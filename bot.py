@@ -929,28 +929,101 @@ class GiveawaySetupView(discord.ui.View):
 # TICKETS
 # ============================================================
 
-TICKET_TOPICS = [
-    discord.SelectOption(
-        label="Contactez le staff",
-        description="Poser une question au staff ou autre."
-    ),
-    discord.SelectOption(
-        label="Partenariat",
-        description="Demande un partenariat."
-    ),
-    discord.SelectOption(
-        label="Achat",
-        description="Question ou demande concernant un achat."
-    ),
-    discord.SelectOption(
-        label="Osint",
-        description="Demande ou question concernant l'OSINT."
-    ),
-    discord.SelectOption(
-        label="Autre...",
-        description="Autre demande non incluse."
-    ),
+DEFAULT_TICKET_TOPICS = [
+    {"name": "Contactez le staff", "description": "Poser une question au staff ou autre."},
+    {"name": "Partenariat", "description": "Demande un partenariat."},
+    {"name": "Achat", "description": "Question ou demande concernant un achat."},
+    {"name": "Osint", "description": "Demande ou question concernant l'OSINT."},
+    {"name": "Autre", "description": "Autre demande non incluse."},
 ]
+
+
+def normalize_ticket_topic_name(name: str) -> str:
+    return " ".join(name.strip().split())
+
+
+def get_ticket_topics(guild_id: int) -> list:
+    cfg = TicketConfigManager.get(guild_id)
+    topics = cfg.get("ticket_topics")
+
+    if not isinstance(topics, list) or not topics:
+        topics = [dict(topic) for topic in DEFAULT_TICKET_TOPICS]
+        TicketConfigManager.set(guild_id, "ticket_topics", topics)
+        return topics
+
+    clean = []
+    for topic in topics:
+        if not isinstance(topic, dict):
+            continue
+        name = normalize_ticket_topic_name(str(topic.get("name", "")))
+        description = " ".join(str(topic.get("description", "")).strip().split())
+        if name:
+            clean.append({
+                "name": name[:100],
+                "description": (description or "Aucune description.")[:100]
+            })
+
+    if not clean:
+        clean = [dict(topic) for topic in DEFAULT_TICKET_TOPICS]
+        TicketConfigManager.set(guild_id, "ticket_topics", clean)
+
+    return clean
+
+
+class TicketTopicsManager:
+
+    @staticmethod
+    def get(guild_id: int) -> list:
+        return get_ticket_topics(guild_id)
+
+    @staticmethod
+    def add(guild_id: int, name: str, description: str):
+        name = normalize_ticket_topic_name(name)
+        description = " ".join(description.strip().split())
+
+        if not name:
+            return False, "Le nom ne peut pas être vide."
+
+        topics = TicketTopicsManager.get(guild_id)
+
+        if len(topics) >= 25:
+            return False, "Discord autorise au maximum 25 catégories."
+
+        if any(t["name"].casefold() == name.casefold() for t in topics):
+            return False, "Cette catégorie existe déjà."
+
+        topics.append({
+            "name": name[:100],
+            "description": (description or "Aucune description.")[:100]
+        })
+
+        TicketConfigManager.set(guild_id, "ticket_topics", topics)
+        return True, name
+
+    @staticmethod
+    def remove(guild_id: int, index: int):
+        topics = TicketTopicsManager.get(guild_id)
+
+        if not 0 <= index < len(topics):
+            return False, None
+
+        removed = topics.pop(index)
+
+        if not topics:
+            topics = [dict(topic) for topic in DEFAULT_TICKET_TOPICS]
+
+        TicketConfigManager.set(guild_id, "ticket_topics", topics)
+        return True, removed
+
+
+def build_ticket_subject_options(guild_id: int):
+    return [
+        discord.SelectOption(
+            label=topic["name"][:100],
+            description=topic["description"][:100]
+        )
+        for topic in TicketTopicsManager.get(guild_id)[:25]
+    ]
 
 
 class TicketDescriptionModal(
@@ -1165,27 +1238,23 @@ class TicketDescriptionModal(
         )
 
 
-class TicketSubjectSelect(
-    discord.ui.View
-):
+class TicketSubjectSelect(discord.ui.View):
 
-    def __init__(self):
+    def __init__(self, guild_id: int):
         super().__init__(timeout=120)
 
-    @discord.ui.select(
-        placeholder="Choisis le sujet de ton ticket.",
-        options=TICKET_TOPICS,
-        custom_id="ticket_subject_select"
-    )
-    async def select_subject(
-        self,
-        interaction: discord.Interaction,
-        select: discord.ui.Select
-    ):
+        self.subject_select = discord.ui.Select(
+            placeholder="Choisis le sujet de ton ticket.",
+            options=build_ticket_subject_options(guild_id),
+            custom_id=f"ticket_subject_select_{guild_id}"
+        )
+
+        self.subject_select.callback = self.select_subject
+        self.add_item(self.subject_select)
+
+    async def select_subject(self, interaction: discord.Interaction):
         await interaction.response.send_modal(
-            TicketDescriptionModal(
-                select.values[0]
-            )
+            TicketDescriptionModal(self.subject_select.values[0])
         )
 
 
@@ -1234,7 +1303,7 @@ class TicketView(
 
         await interaction.followup.send(
             embed=embed,
-            view=TicketSubjectSelect(),
+            view=TicketSubjectSelect(interaction.guild_id),
             ephemeral=True
         )
 
@@ -1459,9 +1528,74 @@ class RemoveStaffRoleSelect(
         )
 
 
-class ConfigPanelView(
-    discord.ui.View
-):
+class AddTicketTopicModal(discord.ui.Modal, title="Ajouter une catégorie"):
+
+    name = TextInput(
+        label="Nom de la catégorie",
+        placeholder="Exemple : Support",
+        max_length=100
+    )
+
+    description = TextInput(
+        label="Description",
+        placeholder="Exemple : Demande de support.",
+        max_length=100,
+        required=False
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        success, result = TicketTopicsManager.add(
+            interaction.guild_id,
+            self.name.value,
+            self.description.value
+        )
+
+        await interaction.response.send_message(
+            f"Catégorie « {result} » ajoutée." if success else result,
+            ephemeral=True
+        )
+
+
+class RemoveTicketTopicSelect(discord.ui.View):
+
+    def __init__(self, guild):
+        super().__init__(timeout=120)
+        self.guild = guild
+
+        options = [
+            discord.SelectOption(
+                label=topic["name"][:100],
+                description=topic["description"][:100],
+                value=str(index)
+            )
+            for index, topic in enumerate(
+                TicketTopicsManager.get(guild.id)[:25]
+            )
+        ]
+
+        self.topic_select = discord.ui.Select(
+            placeholder="Choisis une catégorie à retirer.",
+            options=options,
+            custom_id=f"remove_ticket_topic_{guild.id}"
+        )
+        self.topic_select.callback = self.remove_topic
+        self.add_item(self.topic_select)
+
+    async def remove_topic(self, interaction: discord.Interaction):
+        success, removed = TicketTopicsManager.remove(
+            interaction.guild_id,
+            int(self.topic_select.values[0])
+        )
+
+        await interaction.response.send_message(
+            f"Catégorie « {removed['name']} » retirée."
+            if success
+            else "Cette catégorie n'existe plus.",
+            ephemeral=True
+        )
+
+
+class ConfigPanelView(discord.ui.View):
 
     def __init__(self, guild):
         super().__init__(timeout=300)
@@ -1500,6 +1634,35 @@ class ConfigPanelView(
 
         await interaction.followup.send(
             "Catégorie sauvegardée.",
+            ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Ajouter une catégorie",
+        style=discord.ButtonStyle.success,
+        row=0
+    )
+    async def add_ticket_topic(self, interaction: discord.Interaction, _button):
+        topics = TicketTopicsManager.get(interaction.guild_id)
+
+        if len(topics) >= 25:
+            await interaction.response.send_message(
+                "Tu as atteint la limite de 25 catégories.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(AddTicketTopicModal())
+
+    @discord.ui.button(
+        label="Retirer une catégorie",
+        style=discord.ButtonStyle.danger,
+        row=0
+    )
+    async def remove_ticket_topic(self, interaction: discord.Interaction, _button):
+        await interaction.response.send_message(
+            "Sélectionne la catégorie à retirer.",
+            view=RemoveTicketTopicSelect(self.guild),
             ephemeral=True
         )
 
@@ -1660,6 +1823,19 @@ class ConfigPanelView(
         embed.add_field(
             name="Rôles staff",
             value=roles_str,
+            inline=False
+        )
+
+        topics = TicketTopicsManager.get(interaction.guild_id)
+
+        topics_str = "\n".join(
+            f"{index}. {topic['name']}"
+            for index, topic in enumerate(topics, 1)
+        )
+
+        embed.add_field(
+            name="Catégories / sujets",
+            value=topics_str[:1024] or "Aucune catégorie",
             inline=False
         )
 
