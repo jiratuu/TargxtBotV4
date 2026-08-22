@@ -1,5 +1,29 @@
 {
     "1506369842167419030": {
         "category_id": 1523238323454476349
+    },
+    "1525208154604961822": {
+        "ticket_topics": [
+            {
+                "name": "Contactez le staff",
+                "description": "Poser une question au staff ou autre."
+            },
+            {
+                "name": "Partenariat",
+                "description": "Demande un partenariat."
+            },
+            {
+                "name": "Achat",
+                "description": "Question ou demande concernant un achat."
+            },
+            {
+                "name": "Osint",
+                "description": "Demande ou question concernant l'OSINT."
+            },
+            {
+                "name": "Autre",
+                "description": "Autre demande non incluse."
+            }
+        ]
     }
 }
